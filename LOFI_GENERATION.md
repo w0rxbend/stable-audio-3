@@ -78,7 +78,8 @@ python generate_from_lofi_presets.py --all --dry-run
 | `--preset NAME` | — | Generate from a single named preset |
 | `--all` | — | Generate from all 37 presets |
 | `--random` | — | Pick one preset at random |
-| `--random-from-bank` | — | Pick prompts directly from the 200-prompt bank |
+| `--random-from-bank` | — | Pick prompts randomly from the 200-prompt bank |
+| `--all-from-bank` | — | Generate one track per prompt in the full 200-prompt bank |
 | `--list` | — | List all preset names and exit |
 | `--count N` | `1` | Number of tracks per preset |
 | `--duration SECS` | `240` | Track duration in seconds (medium max: 380) |

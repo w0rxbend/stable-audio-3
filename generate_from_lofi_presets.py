@@ -25,7 +25,10 @@ Basic usage:
   # random preset, 3 variations with prompt randomization
   python generate_from_lofi_presets.py --random --count 3 --seed 42 --randomize-prompts
 
-  # generate directly from the 200-prompt bank (ignores preset parameters)
+  # generate from the full 200-prompt bank, one track per prompt
+  python generate_from_lofi_presets.py --all-from-bank
+
+  # pick prompts randomly from the bank (ignores preset parameters)
   python generate_from_lofi_presets.py --random-from-bank --count 5
 
   # dry-run: see prompts and commands without generating
@@ -60,6 +63,21 @@ except ImportError:
 
 _SCRIPT_DIR = Path(__file__).resolve().parent
 DEFAULT_PRESETS_DIR = _SCRIPT_DIR.parent / "twitch-musicplayer" / "presets" / "lofi"
+
+
+def _cuda_available() -> bool:
+    try:
+        import torch  # noqa: PLC0415
+        return torch.cuda.is_available()
+    except ImportError:
+        return False
+
+
+# Auto-detect sensible defaults at import time so the script works out-of-the-box
+# on both CPU-only and GPU machines.
+_HAS_CUDA = _cuda_available()
+_DEFAULT_MODEL = "medium" if _HAS_CUDA else "small-music"
+_DEFAULT_DURATION = 240.0 if _HAS_CUDA else 120.0
 
 # Human-readable labels for instrument names used in preset YAML files.
 _INSTRUMENT_LABELS: dict[str, str] = {
@@ -368,6 +386,7 @@ class BatchConfig:
     use_bank: bool
     audio_format: str = "mp3"
     keep_wav: bool = False
+    all_bank: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -543,7 +562,8 @@ def _run_generation(
         return True
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    result = subprocess.run(cmd, text=True, check=False)
+    env = {**os.environ, "TRANSFORMERS_VERBOSITY": "warning"}
+    result = subprocess.run(cmd, text=True, check=False, env=env)
     return result.returncode == 0
 
 
@@ -586,6 +606,33 @@ def _make_manifest_entry(
     }
 
 
+def _build_generation_items(
+    selected: list[str],
+    presets_dir: Path,
+    batch: BatchConfig,
+    rng: random.Random | None,
+) -> list[tuple[str, str]]:
+    """Return (name, prompt) pairs that drive the generation loop.
+
+    When `all_bank` is set, iterates the full 200-prompt bank directly and
+    ignores `selected`. Otherwise builds prompts from preset YAML files or
+    samples from the bank per preset slot.
+    """
+    if batch.all_bank:
+        extra = f", {batch.extra_prompt.strip()}" if batch.extra_prompt else ""
+        return [(f"bank_{i + 1:03d}", f"{p}{extra}") for i, p in enumerate(LOFI_PROMPT_BANK)]
+
+    items: list[tuple[str, str]] = []
+    for preset_name in selected:
+        if batch.use_bank and rng is not None:
+            prompt = sample_bank_prompt(rng)
+        else:
+            preset_data = load_preset(presets_dir / f"{preset_name}.yaml")
+            prompt = build_prompt(preset_data, batch.extra_prompt, rng)
+        items.append((preset_name, prompt))
+    return items
+
+
 def _generate_batch(
     selected: list[str],
     presets_dir: Path,
@@ -593,19 +640,14 @@ def _generate_batch(
     batch: BatchConfig,
     gen: GenerationConfig,
 ) -> list[dict]:
-    """Run generation for all selected presets; return JSONL manifest entries."""
-    entries: list[dict] = []
-    total = len(selected) * batch.count
-    seed_counter = batch.seed_start
+    """Run generation for all items; return JSONL manifest entries."""
     rng = random.Random(batch.seed_start) if batch.randomize_prompts or batch.use_bank else None
+    items = _build_generation_items(selected, presets_dir, batch, rng)
+    total = len(items) * batch.count
+    seed_counter = batch.seed_start
+    entries: list[dict] = []
 
-    for idx_p, preset_name in enumerate(selected):
-        if batch.use_bank and rng is not None:
-            prompt = sample_bank_prompt(rng)
-        else:
-            preset_data = load_preset(presets_dir / f"{preset_name}.yaml")
-            prompt = build_prompt(preset_data, batch.extra_prompt, rng)
-
+    for idx_p, (preset_name, prompt) in enumerate(items):
         if batch.show_prompts:
             print(f"\n[{preset_name}]")
             print(f"  prompt: {prompt}")
@@ -661,16 +703,20 @@ def _build_parser() -> argparse.ArgumentParser:
     sel.add_argument("--random", action="store_true", help="Pick one preset at random")
     sel.add_argument("--random-from-bank", action="store_true",
                      help="Generate directly from the 200-prompt bank (ignores preset parameters)")
+    sel.add_argument("--all-from-bank", action="store_true",
+                     help="Generate one track per prompt in the full 200-prompt bank")
     sel.add_argument("--list", action="store_true", help="List available presets and exit")
 
     parser.add_argument("--count", "-n", type=int, default=1, metavar="N",
                         help="Tracks per preset (default: 1)")
-    parser.add_argument("--duration", "-d", type=float, default=240.0, metavar="SECS",
-                        help="Track duration in seconds (default: 240; medium max: 380)")
-    parser.add_argument("--model", "-m", default="medium",
+    parser.add_argument("--duration", "-d", type=float, default=_DEFAULT_DURATION, metavar="SECS",
+                        help=f"Track duration in seconds (default: {_DEFAULT_DURATION:.0f}; "
+                             "medium max: 380, small-music max: 120)")
+    parser.add_argument("--model", "-m", default=_DEFAULT_MODEL,
                         choices=["small-music", "small-sfx", "medium",
                                  "small-music-base", "small-sfx-base", "medium-base"],
-                        help="stable-audio model (default: medium)")
+                        help=f"stable-audio model (default: {_DEFAULT_MODEL}; "
+                             "auto-selected based on CUDA availability)")
     parser.add_argument("--steps", type=int, default=8, metavar="N",
                         help="Diffusion steps (default: 8; try 20–50 for higher quality)")
     parser.add_argument("--cfg-scale", type=float, default=1.0, metavar="F",
@@ -713,7 +759,13 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def _resolve_presets(args: argparse.Namespace, preset_names: list[str]) -> list[str]:
-    """Return the list of preset names to generate from CLI selection flags."""
+    """Return the list of preset names to generate from CLI selection flags.
+
+    Returns an empty list for --all-from-bank because that mode drives
+    generation directly from LOFI_PROMPT_BANK without needing preset files.
+    """
+    if args.all_from_bank:
+        return []
     if args.all or args.random_from_bank:
         return preset_names if args.all else [random.choice(preset_names)]
     if args.random:
@@ -747,10 +799,13 @@ def main() -> None:
             print(f"  {name}")
         return
 
-    if not any([args.preset, args.all, args.random, args.random_from_bank]):
+    if not any([args.preset, args.all, args.random, args.random_from_bank, args.all_from_bank]):
         parser.print_usage()
-        print("\nSpecify one of: --preset NAME  --all  --random  --random-from-bank  --list",
-              file=sys.stderr)
+        print(
+            "\nSpecify one of: --preset NAME  --all  --random"
+            "  --random-from-bank  --all-from-bank  --list",
+            file=sys.stderr,
+        )
         sys.exit(1)
 
     stable_audio = _find_stable_audio(args.stable_audio_bin)
@@ -779,6 +834,7 @@ def main() -> None:
         show_prompts=args.print_prompts or args.dry_run,
         randomize_prompts=args.randomize_prompts,
         use_bank=args.random_from_bank,
+        all_bank=args.all_from_bank,
         audio_format=args.format,
         keep_wav=args.keep_wav,
     )
