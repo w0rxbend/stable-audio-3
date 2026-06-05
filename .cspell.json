@@ -1,0 +1,33 @@
+{
+  "version": "0.2",
+  "words": [
+    "lofi",
+    "loopable",
+    "lowpass",
+    "huggingface",
+    "torchaudio",
+    "safetensors",
+    "einops",
+    "hatchling",
+    "pyyaml",
+    "nargs",
+    "jsonl",
+    "chillhop",
+    "dreamscape",
+    "fingerpicking",
+    "reharmonized",
+    "reverbed",
+    "voicings",
+    "bossa",
+    "bebop",
+    "nocturne",
+    "soundscape",
+    "vibraphone",
+    "arpeggios",
+    "subfolder",
+    "subdir",
+    "nohup",
+    "songgen",
+    "openvino"
+  ]
+}
