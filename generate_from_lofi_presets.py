@@ -366,6 +366,8 @@ class BatchConfig:
     show_prompts: bool
     randomize_prompts: bool
     use_bank: bool
+    audio_format: str = "mp3"
+    keep_wav: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -545,6 +547,20 @@ def _run_generation(
     return result.returncode == 0
 
 
+def _wav_to_mp3(wav_path: Path, mp3_path: Path, keep_wav: bool = False) -> bool:
+    """Convert wav_path to mp3_path via ffmpeg. Returns True on success."""
+    result = subprocess.run(
+        ["ffmpeg", "-y", "-i", str(wav_path), "-q:a", "2", str(mp3_path)],
+        text=True, capture_output=True, check=False,
+    )
+    if result.returncode != 0:
+        print(f"ffmpeg error:\n{result.stderr}", file=sys.stderr)
+        return False
+    if not keep_wav:
+        wav_path.unlink(missing_ok=True)
+    return True
+
+
 def _make_manifest_entry(
     preset_name: str,
     prompt: str,
@@ -600,14 +616,20 @@ def _generate_batch(
             current = idx_p * batch.count + i + 1
             suffix = f"_{i + 1:02d}" if batch.count > 1 else ""
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            out_file = out_dir / f"{preset_name}{suffix}_{timestamp}.wav"
+            wav_file = out_dir / f"{preset_name}{suffix}_{timestamp}.wav"
+            out_file = (
+                out_dir / f"{preset_name}{suffix}_{timestamp}.{batch.audio_format}"
+                if batch.audio_format != "wav" else wav_file
+            )
             current_seed = seed_counter
             seed_counter += 1
 
             if not gen.dry_run:
                 print(f"[{current}/{total}] {preset_name}{suffix}  seed={current_seed}  duration={batch.duration}s")
 
-            ok = _run_generation(prompt, batch.negative_prompt, out_file, batch.duration, current_seed, gen)
+            ok = _run_generation(prompt, batch.negative_prompt, wav_file, batch.duration, current_seed, gen)
+            if ok and batch.audio_format != "wav" and not gen.dry_run:
+                ok = _wav_to_mp3(wav_file, out_file, keep_wav=batch.keep_wav)
             entries.append(_make_manifest_entry(
                 preset_name, prompt, batch.negative_prompt, out_file, current_seed, ok, gen, batch,
             ))
@@ -657,6 +679,10 @@ def _build_parser() -> argparse.ArgumentParser:
                         help="Base seed; incremented per track. Default: random")
     parser.add_argument("--device", default=None, metavar="DEVICE",
                         help="Torch device: cuda / mps / cpu (auto-detected by default)")
+    parser.add_argument("--format", default="mp3", choices=["mp3", "wav"],
+                        help="Output format (default: mp3; converted via ffmpeg after generation)")
+    parser.add_argument("--keep-wav", action="store_true",
+                        help="Keep the intermediate WAV when --format mp3 is used")
 
     parser.add_argument("--extra-prompt", metavar="TEXT",
                         help="Extra text appended to every generated prompt")
@@ -753,6 +779,8 @@ def main() -> None:
         show_prompts=args.print_prompts or args.dry_run,
         randomize_prompts=args.randomize_prompts,
         use_bank=args.random_from_bank,
+        audio_format=args.format,
+        keep_wav=args.keep_wav,
     )
     gen = GenerationConfig(
         model=args.model,
