@@ -18,6 +18,8 @@ Additional configs:
 prompts/chillhop_rhythmic_lofi.jsonl
 prompts/ambient_calm_sad_sleep.jsonl
 prompts/georgian_celtic_ritual_chant.jsonl
+prompts/lofi_ambient_90s_grunge.jsonl
+prompts/lofi_ambient_90s_grunge_sleepy_rain.jsonl
 ```
 
 Each non-empty line is one prompt record. The simplest record is:
@@ -91,6 +93,13 @@ Generate the Georgian / Celtic ritual chant config:
 
 ```bash
 python generate_from_lofi_presets.py prompts/georgian_celtic_ritual_chant.jsonl
+```
+
+Generate the lo-fi ambient calm 90s grunge configs:
+
+```bash
+python generate_from_lofi_presets.py prompts/lofi_ambient_90s_grunge.jsonl
+python generate_from_lofi_presets.py prompts/lofi_ambient_90s_grunge_sleepy_rain.jsonl
 ```
 
 Use a custom output directory:
