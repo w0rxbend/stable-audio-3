@@ -17,9 +17,13 @@ Additional configs:
 ```bash
 prompts/chillhop_rhythmic_lofi.jsonl
 prompts/ambient_calm_sad_sleep.jsonl
-prompts/georgian_celtic_ritual_chant.jsonl
+prompts/celtic_ritual_chants.jsonl
 prompts/lofi_ambient_90s_grunge.jsonl
 prompts/lofi_ambient_90s_grunge_sleepy_rain.jsonl
+prompts/lofi_ambient_city_night_study.jsonl
+prompts/lofi_ambient_morning_study_light.jsonl
+prompts/lofi_ambient_ocean_haze.jsonl
+prompts/instrumental_calm_guitar.jsonl
 ```
 
 Each non-empty line is one prompt record. The simplest record is:
@@ -45,6 +49,7 @@ Optional object fields:
 | Field | Description |
 | --- | --- |
 | `name` | Output/manifest name; defaults to `prompt_001`, `prompt_002`, etc. |
+| `display_name` | Optional human-readable title used for output filenames and display logging; defaults to `name`. |
 | `duration` | Per-track duration override |
 | `seed` | Per-track seed override |
 | `negative_prompt` | Per-track negative prompt override |
@@ -89,10 +94,10 @@ Generate the ambient / calm / sad sleep music config:
 python generate_from_lofi_presets.py prompts/ambient_calm_sad_sleep.jsonl
 ```
 
-Generate the Georgian / Celtic ritual chant config:
+Generate the Celtic ritual chants config:
 
 ```bash
-python generate_from_lofi_presets.py prompts/georgian_celtic_ritual_chant.jsonl
+python generate_from_lofi_presets.py prompts/celtic_ritual_chants.jsonl
 ```
 
 Generate the lo-fi ambient calm 90s grunge configs:
@@ -100,6 +105,30 @@ Generate the lo-fi ambient calm 90s grunge configs:
 ```bash
 python generate_from_lofi_presets.py prompts/lofi_ambient_90s_grunge.jsonl
 python generate_from_lofi_presets.py prompts/lofi_ambient_90s_grunge_sleepy_rain.jsonl
+```
+
+Generate the lo-fi ambient city night study config:
+
+```bash
+python generate_from_lofi_presets.py prompts/lofi_ambient_city_night_study.jsonl
+```
+
+Generate the lo-fi ambient morning study config:
+
+```bash
+python generate_from_lofi_presets.py prompts/lofi_ambient_morning_study_light.jsonl
+```
+
+Generate the lo-fi ambient ocean haze config:
+
+```bash
+python generate_from_lofi_presets.py prompts/lofi_ambient_ocean_haze.jsonl
+```
+
+Generate the instrumental calm guitar config:
+
+```bash
+python generate_from_lofi_presets.py prompts/instrumental_calm_guitar.jsonl
 ```
 
 Use a custom output directory:

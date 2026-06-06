@@ -63,6 +63,7 @@ SUPPORTED_FORMATS = ("mp3", "wav")
 
 _KNOWN_PROMPT_FIELDS = {
     "name",
+    "display_name",
     "prompt",
     "duration",
     "seed",
@@ -75,11 +76,14 @@ _KNOWN_PROMPT_FIELDS = {
     "keep_wav",
 }
 
+_NAME_COUNTER_RE = re.compile(r"#(?P<counter>\d{3})")
+
 
 @dataclass(frozen=True)
 class PromptRecord:
     index: int
     name: str
+    display_name: str
     prompt: str
     duration: float | None = None
     seed: int | None = None
@@ -159,6 +163,11 @@ def _prompt_record_from_object(record: dict[str, Any], index: int, line_number: 
         if "name" in record and record["name"] is not None
         else f"prompt_{index:03d}"
     )
+    display_name = (
+        _coerce_str(record["display_name"], "display_name", line_number)
+        if "display_name" in record and record["display_name"] is not None
+        else name
+    )
     prompt = _coerce_str(record["prompt"], "prompt", line_number)
     audio_format = None
     if record.get("format") is not None:
@@ -182,6 +191,7 @@ def _prompt_record_from_object(record: dict[str, Any], index: int, line_number: 
     return PromptRecord(
         index=index,
         name=name,
+        display_name=display_name,
         prompt=prompt,
         duration=(
             _coerce_float(record["duration"], "duration", line_number)
@@ -236,7 +246,14 @@ def load_prompt_records(config_path: Path) -> list[PromptRecord]:
             index = len(records) + 1
             if isinstance(parsed, str):
                 prompt = _coerce_str(parsed, "prompt", line_number)
-                records.append(PromptRecord(index=index, name=f"prompt_{index:03d}", prompt=prompt))
+                records.append(
+                    PromptRecord(
+                        index=index,
+                        name=f"prompt_{index:03d}",
+                        display_name=f"prompt_{index:03d}",
+                        prompt=prompt,
+                    )
+                )
             elif isinstance(parsed, dict):
                 records.append(_prompt_record_from_object(parsed, index, line_number))
             else:
@@ -260,6 +277,46 @@ def _safe_stem(value: str) -> str:
     stem = re.sub(r"[^A-Za-z0-9_.-]+", "_", value.strip().lower())
     stem = re.sub(r"_+", "_", stem).strip("._-")
     return stem or "prompt"
+
+
+def _unique_display_name(
+    base_display_name: str,
+    position: int,
+    timestamp: str,
+    out_dir: Path,
+) -> str:
+    """Return a display name whose generated output filename does not already exist."""
+
+    base_display_name = base_display_name.strip() or "calm track"
+    matches = list(_NAME_COUNTER_RE.finditer(base_display_name))
+
+    if matches:
+        match = matches[-1]
+        base = base_display_name[:match.start()]
+        suffix = base_display_name[match.end():]
+        counter = int(match.group("counter"))
+        while True:
+            candidate_name = f"{base}#{counter:03d}{suffix}"
+            stem = f"{position:03d}_{_safe_stem(candidate_name)}_{timestamp}"
+            wav_file = out_dir / f"{stem}.wav"
+            mp3_file = out_dir / f"{stem}.mp3"
+            if not wav_file.exists() and not mp3_file.exists():
+                return candidate_name
+            counter += 1
+
+    counter = 0
+    while True:
+        candidate_name = (
+            base_display_name if counter == 0 else f"{base_display_name} #{counter:03d}"
+        )
+        stem = f"{position:03d}_{_safe_stem(candidate_name)}_{timestamp}"
+        wav_file = out_dir / f"{stem}.wav"
+        mp3_file = out_dir / f"{stem}.mp3"
+        if not wav_file.exists() and not mp3_file.exists():
+            if counter == 0:
+                return base_display_name
+            return candidate_name
+        counter += 1
 
 
 def _run_generation(
@@ -338,6 +395,7 @@ def _manifest_entry(
     return {
         "index": record.index,
         "name": record.name,
+        "display_name": record.display_name,
         "prompt": record.prompt,
         "negative_prompt": negative_prompt,
         "output": str(out_file),
@@ -383,18 +441,24 @@ def _generate_from_config(
         audio_format = record.audio_format or defaults.audio_format
         keep_wav = record.keep_wav if record.keep_wav is not None else defaults.keep_wav
 
-        stem = f"{position:03d}_{_safe_stem(record.name)}_{timestamp}"
+        display_name = _unique_display_name(
+            base_display_name=record.display_name,
+            position=position,
+            timestamp=timestamp,
+            out_dir=out_dir,
+        )
+        stem = f"{position:03d}_{_safe_stem(display_name)}_{timestamp}"
         wav_file = out_dir / f"{stem}.wav"
         out_file = wav_file if audio_format == "wav" else out_dir / f"{stem}.{audio_format}"
 
         if print_prompts:
-            print(f"\n[{position}/{total}] {record.name}")
+            print(f"\n[{position}/{total}] {display_name}")
             print(f"  prompt: {record.prompt}")
             if negative_prompt:
                 print(f"  negative: {negative_prompt}")
 
         if not gen.dry_run:
-            print(f"[{position}/{total}] {record.name}  seed={seed}  duration={duration}s")
+            print(f"[{position}/{total}] {display_name}  seed={seed}  duration={duration}s")
 
         ok = _run_generation(
             record=record,
