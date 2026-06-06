@@ -148,10 +148,12 @@ python generate_from_lofi_presets.py \
 # 12 tracks from a fixed preset
 python generate_from_lofi_presets.py \
   --preset ambient_lofi \
-  --count 12 \
+  --count 20 \
   --randomize-prompts \
-  --seed 100 \
-  --out-dir output/ambient_12
+  --seed 10 \
+  --duration 240 \
+  --out-dir ~/Music/ambient_lofi_session_$(date +%Y%m%d)
+
 ```
 
 ### All 37 presets
