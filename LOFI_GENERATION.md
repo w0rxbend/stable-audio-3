@@ -185,10 +185,10 @@ HF_TOKEN=...
 
 ## Output
 
-Generated files are named with their config order and prompt name:
+Generated files are named with their config order and prompt `name`:
 
 ```text
-output/stable_audio/001_adhd_focus_lofi_001_20260606_120000.mp3
+output/stable_audio/ADHD Focus Lofi #001 - rain-muted attention bed.mp3
 ```
 
 The manifest is JSONL and records the resolved prompt, seed, model, duration,

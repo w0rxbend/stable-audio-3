@@ -274,15 +274,14 @@ def _find_stable_audio(override: str | None) -> str | None:
 
 
 def _safe_stem(value: str) -> str:
-    stem = re.sub(r"[^A-Za-z0-9_.-]+", "_", value.strip().lower())
-    stem = re.sub(r"_+", "_", stem).strip("._-")
+    stem = re.sub(r"[\\/\0]", "", value.strip())
+    stem = re.sub(r"\s+", " ", stem).strip()
+    stem = stem.strip(". ")
     return stem or "prompt"
 
 
 def _unique_display_name(
     base_display_name: str,
-    position: int,
-    timestamp: str,
     out_dir: Path,
 ) -> str:
     """Return a display name whose generated output filename does not already exist."""
@@ -297,7 +296,7 @@ def _unique_display_name(
         counter = int(match.group("counter"))
         while True:
             candidate_name = f"{base}#{counter:03d}{suffix}"
-            stem = f"{position:03d}_{_safe_stem(candidate_name)}_{timestamp}"
+            stem = _safe_stem(candidate_name)
             wav_file = out_dir / f"{stem}.wav"
             mp3_file = out_dir / f"{stem}.mp3"
             if not wav_file.exists() and not mp3_file.exists():
@@ -309,7 +308,7 @@ def _unique_display_name(
         candidate_name = (
             base_display_name if counter == 0 else f"{base_display_name} #{counter:03d}"
         )
-        stem = f"{position:03d}_{_safe_stem(candidate_name)}_{timestamp}"
+        stem = _safe_stem(candidate_name)
         wav_file = out_dir / f"{stem}.wav"
         mp3_file = out_dir / f"{stem}.mp3"
         if not wav_file.exists() and not mp3_file.exists():
@@ -423,7 +422,6 @@ def _generate_from_config(
     print_prompts: bool,
 ) -> list[dict[str, Any]]:
     entries: list[dict[str, Any]] = []
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     total = len(records)
 
     for position, record in enumerate(records, start=1):
@@ -441,24 +439,25 @@ def _generate_from_config(
         audio_format = record.audio_format or defaults.audio_format
         keep_wav = record.keep_wav if record.keep_wav is not None else defaults.keep_wav
 
-        display_name = _unique_display_name(
-            base_display_name=record.display_name,
-            position=position,
-            timestamp=timestamp,
+        filename_name = _unique_display_name(
+            base_display_name=record.name,
             out_dir=out_dir,
         )
-        stem = f"{position:03d}_{_safe_stem(display_name)}_{timestamp}"
+        stem = _safe_stem(filename_name)
         wav_file = out_dir / f"{stem}.wav"
         out_file = wav_file if audio_format == "wav" else out_dir / f"{stem}.{audio_format}"
 
         if print_prompts:
-            print(f"\n[{position}/{total}] {display_name}")
+            print(f"\n[{position}/{total}] {record.display_name}")
             print(f"  prompt: {record.prompt}")
             if negative_prompt:
                 print(f"  negative: {negative_prompt}")
 
         if not gen.dry_run:
-            print(f"[{position}/{total}] {display_name}  seed={seed}  duration={duration}s")
+            print(
+                f"[{position}/{total}] {record.display_name} ({filename_name})  "
+                f"seed={seed}  duration={duration}s"
+            )
 
         ok = _run_generation(
             record=record,
