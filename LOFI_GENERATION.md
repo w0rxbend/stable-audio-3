@@ -24,6 +24,7 @@ prompts/lofi_ambient_city_night_study.jsonl
 prompts/lofi_ambient_morning_study_light.jsonl
 prompts/lofi_ambient_ocean_haze.jsonl
 prompts/instrumental_calm_guitar.jsonl
+prompts/grunge_guitar_lofi.jsonl
 ```
 
 Each non-empty line is one prompt record. The simplest record is:
@@ -129,6 +130,12 @@ Generate the instrumental calm guitar config:
 
 ```bash
 python generate_from_lofi_presets.py prompts/instrumental_calm_guitar.jsonl
+```
+
+Generate the grunge guitar lofi config:
+
+```bash
+python generate_from_lofi_presets.py prompts/grunge_guitar_lofi.jsonl
 ```
 
 Use a custom output directory:
