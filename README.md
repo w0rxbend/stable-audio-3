@@ -207,6 +207,16 @@ See [Autoencoder Workflows](docs/workflows/autoencoder.md) for encoding batches,
 
 ## CLI
 
+For a CPU batch of **144 lo-fi, doomer, grunge, and related instrumental tracks**
+at five minutes each, see the [Afterhours prompt collection and setup guide](prompts/AFTERHOURS.md).
+The local batch script supports the upstream TFLite runtime, including Medium
+on CPU:
+
+```bash
+(cd optimized/tflite && ./install.sh --download medium)
+bash scripts/generate_afterhours_cpu.sh
+```
+
 A `stable-audio` cli is included for running generation without writing any Python.
 
 **Text-to-audio:**

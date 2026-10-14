@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Generate audio from a JSONL prompt config via the stable-audio CLI.
+Generate audio from a JSONL prompt config via PyTorch or the TFLite CPU CLI.
 
 Prompt data lives outside this script. Each non-empty JSONL line can be either
 a JSON object:
@@ -15,12 +15,15 @@ Object records require `prompt`; `name` is optional. Per-record overrides are
 supported for `duration`, `seed`, `negative_prompt`, `model`, `steps`,
 `cfg_scale`, `device`, `format`, and `keep_wav`.
 """
+
 from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -30,21 +33,13 @@ from pathlib import Path
 from typing import Any
 
 _SCRIPT_DIR = Path(__file__).resolve().parent
-DEFAULT_PROMPTS_CONFIG = _SCRIPT_DIR / "prompts" / "adhd_focus_lofi.jsonl"
+DEFAULT_PROMPTS_CONFIG = _SCRIPT_DIR / "prompts" / "afterhours_144.jsonl"
+TFLITE_BIN = _SCRIPT_DIR / "optimized" / "tflite" / "sa3"
+TFLITE_MODELS = {"small-music": "sm-music", "small-sfx": "sm-sfx", "medium": "medium"}
 
 
-def _cuda_available() -> bool:
-    try:
-        import torch  # noqa: PLC0415
-
-        return torch.cuda.is_available()
-    except ImportError:
-        return False
-
-
-_HAS_CUDA = _cuda_available()
-_DEFAULT_MODEL = "medium" if _HAS_CUDA else "small-music"
-_DEFAULT_DURATION = 240.0 if _HAS_CUDA else 120.0
+_DEFAULT_MODEL = "medium"
+_DEFAULT_DURATION = 300.0
 
 DEFAULT_NEGATIVE_PROMPT = (
     "fast tempo, harsh distortion, heavy metal, EDM, house music, "
@@ -115,11 +110,17 @@ class CliDefaults:
 class GenerationConfig:
     stable_audio_bin: str
     dry_run: bool
+    backend: str = "pytorch"
+    threads: int = 8
+    decoder: str = "same-s"
+    dit_precision: str = "w8a8"
 
 
 def _coerce_str(value: Any, field_name: str, line_number: int) -> str:
     if not isinstance(value, str) or not value.strip():
-        raise ValueError(f"line {line_number}: `{field_name}` must be a non-empty string")
+        raise ValueError(
+            f"line {line_number}: `{field_name}` must be a non-empty string"
+        )
     return value.strip()
 
 
@@ -129,7 +130,9 @@ def _coerce_float(value: Any, field_name: str, line_number: int) -> float:
     try:
         return float(value)
     except (TypeError, ValueError) as exc:
-        raise ValueError(f"line {line_number}: `{field_name}` must be a number") from exc
+        raise ValueError(
+            f"line {line_number}: `{field_name}` must be a number"
+        ) from exc
 
 
 def _coerce_int(value: Any, field_name: str, line_number: int) -> int:
@@ -138,7 +141,9 @@ def _coerce_int(value: Any, field_name: str, line_number: int) -> int:
     try:
         return int(value)
     except (TypeError, ValueError) as exc:
-        raise ValueError(f"line {line_number}: `{field_name}` must be an integer") from exc
+        raise ValueError(
+            f"line {line_number}: `{field_name}` must be an integer"
+        ) from exc
 
 
 def _coerce_bool(value: Any, field_name: str, line_number: int) -> bool:
@@ -147,14 +152,18 @@ def _coerce_bool(value: Any, field_name: str, line_number: int) -> bool:
     return value
 
 
-def _validate_choice(value: str, choices: tuple[str, ...], field_name: str, line_number: int) -> str:
+def _validate_choice(
+    value: str, choices: tuple[str, ...], field_name: str, line_number: int
+) -> str:
     if value not in choices:
         joined = ", ".join(choices)
         raise ValueError(f"line {line_number}: `{field_name}` must be one of: {joined}")
     return value
 
 
-def _prompt_record_from_object(record: dict[str, Any], index: int, line_number: int) -> PromptRecord:
+def _prompt_record_from_object(
+    record: dict[str, Any], index: int, line_number: int
+) -> PromptRecord:
     if "prompt" not in record:
         raise ValueError(f"line {line_number}: JSON object records require `prompt`")
 
@@ -195,33 +204,40 @@ def _prompt_record_from_object(record: dict[str, Any], index: int, line_number: 
         prompt=prompt,
         duration=(
             _coerce_float(record["duration"], "duration", line_number)
-            if record.get("duration") is not None else None
+            if record.get("duration") is not None
+            else None
         ),
         seed=(
             _coerce_int(record["seed"], "seed", line_number)
-            if record.get("seed") is not None else None
+            if record.get("seed") is not None
+            else None
         ),
         negative_prompt=(
             str(record["negative_prompt"])
-            if record.get("negative_prompt") is not None else None
+            if record.get("negative_prompt") is not None
+            else None
         ),
         model=model,
         steps=(
             _coerce_int(record["steps"], "steps", line_number)
-            if record.get("steps") is not None else None
+            if record.get("steps") is not None
+            else None
         ),
         cfg_scale=(
             _coerce_float(record["cfg_scale"], "cfg_scale", line_number)
-            if record.get("cfg_scale") is not None else None
+            if record.get("cfg_scale") is not None
+            else None
         ),
         device=(
             _coerce_str(record["device"], "device", line_number)
-            if record.get("device") is not None else None
+            if record.get("device") is not None
+            else None
         ),
         audio_format=audio_format,
         keep_wav=(
             _coerce_bool(record["keep_wav"], "keep_wav", line_number)
-            if record.get("keep_wav") is not None else None
+            if record.get("keep_wav") is not None
+            else None
         ),
         metadata=metadata,
     )
@@ -241,7 +257,9 @@ def load_prompt_records(config_path: Path) -> list[PromptRecord]:
             try:
                 parsed = json.loads(line)
             except json.JSONDecodeError as exc:
-                raise ValueError(f"line {line_number}: invalid JSON: {exc.msg}") from exc
+                raise ValueError(
+                    f"line {line_number}: invalid JSON: {exc.msg}"
+                ) from exc
 
             index = len(records) + 1
             if isinstance(parsed, str):
@@ -257,7 +275,9 @@ def load_prompt_records(config_path: Path) -> list[PromptRecord]:
             elif isinstance(parsed, dict):
                 records.append(_prompt_record_from_object(parsed, index, line_number))
             else:
-                raise ValueError(f"line {line_number}: expected a JSON object or JSON string")
+                raise ValueError(
+                    f"line {line_number}: expected a JSON object or JSON string"
+                )
 
     if not records:
         raise ValueError(f"prompts config contains no prompt records: {config_path}")
@@ -291,8 +311,8 @@ def _unique_display_name(
 
     if matches:
         match = matches[-1]
-        base = base_display_name[:match.start()]
-        suffix = base_display_name[match.end():]
+        base = base_display_name[: match.start()]
+        suffix = base_display_name[match.end() :]
         counter = int(match.group("counter"))
         while True:
             candidate_name = f"{base}#{counter:03d}{suffix}"
@@ -330,30 +350,56 @@ def _run_generation(
     device: str | None,
     config: GenerationConfig,
 ) -> bool:
-    cmd = [
-        config.stable_audio_bin,
-        "--model", model,
-        "-p", record.prompt,
-        "--duration", str(duration),
-        "--steps", str(steps),
-        "--cfg-scale", str(cfg_scale),
-        "--seed", str(seed),
-        "-o", str(output_path),
-    ]
+    if config.backend == "tflite":
+        # The upstream wrapper changes cwd; absolute paths keep outputs in OUT_DIR.
+        cmd = [
+            config.stable_audio_bin,
+            "--dit",
+            TFLITE_MODELS[model],
+            "--decoder",
+            config.decoder,
+            "--prompt",
+            record.prompt,
+            "--seconds",
+            str(duration),
+            "--steps",
+            str(steps),
+            "--cfg",
+            str(cfg_scale),
+            "--seed",
+            str(seed),
+            "--threads",
+            str(config.threads),
+            "--out",
+            str(output_path.resolve()),
+        ]
+        if config.dit_precision:
+            cmd += ["--dit-precision", config.dit_precision]
+    else:
+        cmd = [
+            config.stable_audio_bin,
+            "--model",
+            model,
+            "-p",
+            record.prompt,
+            "--duration",
+            str(duration),
+            "--steps",
+            str(steps),
+            "--cfg-scale",
+            str(cfg_scale),
+            "--seed",
+            str(seed),
+            "-o",
+            str(output_path),
+        ]
     if negative_prompt:
         cmd += ["--negative-prompt", negative_prompt]
-    if device:
+    if device and config.backend == "pytorch":
         cmd += ["--device", device]
 
     if config.dry_run:
-        print(f"[dry-run] {config.stable_audio_bin} --model {model} \\")
-        print(f"  -p {record.prompt!r} \\")
-        if negative_prompt:
-            print(f"  --negative-prompt {negative_prompt!r} \\")
-        print(
-            f"  --duration {duration} --steps {steps} --cfg-scale {cfg_scale} "
-            f"--seed {seed} -o {output_path}"
-        )
+        print(f"[dry-run] {shlex.join(cmd)}")
         return True
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -426,15 +472,25 @@ def _generate_from_config(
 
     for position, record in enumerate(records, start=1):
         duration = record.duration if record.duration is not None else defaults.duration
-        seed = record.seed if record.seed is not None else defaults.seed_start + position - 1
-        negative_prompt = "" if defaults.disable_negative_prompt else (
-            record.negative_prompt
-            if record.negative_prompt is not None
-            else defaults.negative_prompt
+        seed = (
+            record.seed
+            if record.seed is not None
+            else defaults.seed_start + position - 1
+        )
+        negative_prompt = (
+            ""
+            if defaults.disable_negative_prompt
+            else (
+                record.negative_prompt
+                if record.negative_prompt is not None
+                else defaults.negative_prompt
+            )
         )
         model = record.model or defaults.model
         steps = record.steps if record.steps is not None else defaults.steps
-        cfg_scale = record.cfg_scale if record.cfg_scale is not None else defaults.cfg_scale
+        cfg_scale = (
+            record.cfg_scale if record.cfg_scale is not None else defaults.cfg_scale
+        )
         device = record.device if record.device is not None else defaults.device
         audio_format = record.audio_format or defaults.audio_format
         keep_wav = record.keep_wav if record.keep_wav is not None else defaults.keep_wav
@@ -445,7 +501,9 @@ def _generate_from_config(
         )
         stem = _safe_stem(filename_name)
         wav_file = out_dir / f"{stem}.wav"
-        out_file = wav_file if audio_format == "wav" else out_dir / f"{stem}.{audio_format}"
+        out_file = (
+            wav_file if audio_format == "wav" else out_dir / f"{stem}.{audio_format}"
+        )
 
         if print_prompts:
             print(f"\n[{position}/{total}] {record.display_name}")
@@ -474,22 +532,28 @@ def _generate_from_config(
         if ok and audio_format == "mp3" and not gen.dry_run:
             ok = _wav_to_mp3(wav_file, out_file, keep_wav=keep_wav)
 
-        entries.append(
-            _manifest_entry(
-                record=record,
-                prompts_config=prompts_config,
-                out_file=out_file,
-                success=ok,
-                duration=duration,
-                seed=seed,
-                negative_prompt=negative_prompt,
-                model=model,
-                steps=steps,
-                cfg_scale=cfg_scale,
-                device=device,
-                audio_format=audio_format,
-            )
+        entry = _manifest_entry(
+            record=record,
+            prompts_config=prompts_config,
+            out_file=out_file,
+            success=ok,
+            duration=duration,
+            seed=seed,
+            negative_prompt=negative_prompt,
+            model=model,
+            steps=steps,
+            cfg_scale=cfg_scale,
+            device="cpu" if gen.backend == "tflite" else device,
+            audio_format=audio_format,
         )
+        entry["backend"] = gen.backend
+        if gen.backend == "tflite":
+            entry.update(
+                threads=gen.threads,
+                decoder=gen.decoder,
+                dit_precision=gen.dit_precision,
+            )
+        entries.append(entry)
 
     if not gen.dry_run:
         manifest_path.parent.mkdir(parents=True, exist_ok=True)
@@ -522,6 +586,30 @@ def _build_parser() -> argparse.ArgumentParser:
         help=f"JSONL prompts config (default: {DEFAULT_PROMPTS_CONFIG})",
     )
     parser.add_argument(
+        "--backend",
+        choices=("pytorch", "tflite"),
+        default="tflite",
+        help="Inference runtime (tflite supports Medium on CPU without PyTorch/CUDA)",
+    )
+    parser.add_argument(
+        "--threads",
+        type=int,
+        default=8,
+        help="TFLite CPU threads (default: 8)",
+    )
+    parser.add_argument(
+        "--decoder",
+        choices=("same-s", "same-l"),
+        default="same-s",
+        help="TFLite codec (same-s is faster; same-l is larger)",
+    )
+    parser.add_argument(
+        "--dit-precision",
+        choices=("w8a8", "fp32"),
+        default="w8a8",
+        help="TFLite DiT precision (default: w8a8; try fp32 on CPUs without fast int8)",
+    )
+    parser.add_argument(
         "--duration",
         "-d",
         type=float,
@@ -537,7 +625,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "-m",
         default=_DEFAULT_MODEL,
         choices=SUPPORTED_MODELS,
-        help=f"Default stable-audio model (default: {_DEFAULT_MODEL}; auto-selected by CUDA)",
+        help=f"Default stable-audio model (default: {_DEFAULT_MODEL})",
     )
     parser.add_argument(
         "--steps",
@@ -604,7 +692,13 @@ def _build_parser() -> argparse.ArgumentParser:
         "--stable-audio-bin",
         metavar="PATH",
         default=os.environ.get("STABLE_AUDIO_BIN"),
-        help="Path to stable-audio executable",
+        help="Path to runtime executable (stable-audio or a TFLite sa3 wrapper)",
+    )
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        help="Generate only the first N records (use 1 for a short audition)",
     )
     parser.add_argument(
         "--dry-run",
@@ -630,7 +724,43 @@ def main() -> None:
         print(f"Error: {exc}", file=sys.stderr)
         sys.exit(1)
 
-    stable_audio = _find_stable_audio(args.stable_audio_bin)
+    if args.limit is not None:
+        if args.limit <= 0:
+            parser.error("--limit must be positive")
+        records = records[: args.limit]
+    if args.threads <= 0:
+        parser.error("--threads must be positive")
+    for record in records:
+        model = record.model or args.model
+        duration = record.duration if record.duration is not None else args.duration
+        max_duration = 380 if model.startswith("medium") else 120
+        if not math.isfinite(duration) or not 0 < duration <= max_duration:
+            parser.error(
+                f"{record.name}: duration must be > 0 and <= {max_duration}s for {model}"
+            )
+        device = record.device if record.device is not None else args.device
+        if args.backend == "tflite":
+            if model not in TFLITE_MODELS:
+                parser.error(
+                    f"{record.name}: TFLite does not support base model {model}"
+                )
+            if device not in (None, "cpu"):
+                parser.error("TFLite runs on CPU; omit --device or use --device cpu")
+
+    stable_audio = (
+        args.stable_audio_bin or str(TFLITE_BIN)
+        if args.backend == "tflite"
+        else _find_stable_audio(args.stable_audio_bin)
+    )
+    if args.backend == "tflite" and not args.dry_run and not args.stable_audio_bin:
+        runtime_python = TFLITE_BIN.parent / ".venv" / "bin" / "python"
+        windows_python = TFLITE_BIN.parent / ".venv" / "Scripts" / "python.exe"
+        if not TFLITE_BIN.is_file() or not (
+            runtime_python.is_file() or windows_python.is_file()
+        ):
+            parser.error(
+                "TFLite runtime is not installed. Run: cd optimized/tflite && ./install.sh"
+            )
     if stable_audio is None and not args.dry_run:
         print(
             "Error: stable-audio executable not found. Run 'uv sync' in stable-audio-3/.\n"
@@ -638,6 +768,12 @@ def main() -> None:
             file=sys.stderr,
         )
         sys.exit(1)
+
+    if not args.dry_run and any(
+        (record.audio_format or args.format) == "mp3" for record in records
+    ):
+        if shutil.which("ffmpeg") is None:
+            parser.error("MP3 output requires ffmpeg; install it or use --format wav")
 
     out_dir = Path(args.out_dir)
     manifest_path = Path(args.manifest) if args.manifest else out_dir / "manifest.jsonl"
@@ -659,6 +795,10 @@ def main() -> None:
     gen = GenerationConfig(
         stable_audio_bin=stable_audio or "stable-audio",
         dry_run=args.dry_run,
+        backend=args.backend,
+        threads=args.threads,
+        decoder=args.decoder,
+        dit_precision=args.dit_precision,
     )
 
     entries = _generate_from_config(
@@ -679,6 +819,8 @@ def main() -> None:
     print(f"\nDone: {success_count}/{len(entries)} tracks generated.")
     print(f"Output: {out_dir}")
     print(f"Manifest: {manifest_path}")
+    if success_count != len(entries):
+        sys.exit(1)
 
 
 if __name__ == "__main__":
